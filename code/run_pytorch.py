@@ -25,16 +25,16 @@ import matplotlib.pyplot as plt
 # ============================================================================
 
 MODEL_PARAMS = {
-    'tauSyn': 5.0,        # ms
-    'tDelay': 1.8,        # ms
-    'v0': -52.0,          # mV
-    'vReset': -52.0,      # mV
-    'vRest': -52.0,       # mV
-    'vThreshold': -45.0,  # mV
-    'tauMem': 20.0,       # ms
-    'tRefrac': 2.2,       # ms
-    'scalePoisson': 250,
-    'wScale': 0.275,
+    "tauSyn": 5.0,  # ms
+    "tDelay": 1.8,  # ms
+    "v0": -52.0,  # mV
+    "vReset": -52.0,  # mV
+    "vRest": -52.0,  # mV
+    "vThreshold": -45.0,  # mV
+    "tauMem": 20.0,  # ms
+    "tRefrac": 2.2,  # ms
+    "scalePoisson": 250,
+    "wScale": 0.275,
 }
 
 DT = 0.1  # Simulation timestep in ms (matches Brian2 defaultclock.dt)
@@ -43,26 +43,29 @@ DT = 0.1  # Simulation timestep in ms (matches Brian2 defaultclock.dt)
 # Model Classes
 # ============================================================================
 
+
 class PoissonSpikeGenerator(nn.Module):
     """Generates one timestep of Poisson-distributed spikes from firing rates."""
 
-    def __init__(self, dt, scale, device='cpu'):
+    def __init__(self, dt, scale, device="cpu"):
         super().__init__()
         self.prob_scale = dt / 1000.0
         self.scale = scale
         self.device = device
 
     def forward(self, rates, generator=None):
-        return torch.bernoulli(rates * self.prob_scale, generator=generator) * self.scale
+        return (
+            torch.bernoulli(rates * self.prob_scale, generator=generator) * self.scale
+        )
 
 
 class AlphaSynapse(nn.Module):
     """Alpha-function synapse dynamics with configurable delay."""
 
-    def __init__(self, batch, size, dt, params, device='cpu'):
+    def __init__(self, batch, size, dt, params, device="cpu"):
         super().__init__()
-        self.time_factor = dt / params['tauSyn']
-        self.steps_delay = int(params['tDelay'] / dt)
+        self.time_factor = dt / params["tauSyn"]
+        self.steps_delay = int(params["tDelay"] / dt)
         self.size = size
         self.device = device
         self.batch = batch
@@ -86,15 +89,15 @@ class AlphaSynapse(nn.Module):
 class LIFNeuron(nn.Module):
     """Leaky Integrate-and-Fire neuron with surrogate gradient (ATan)."""
 
-    def __init__(self, batch, size, dt, params, device='cpu'):
+    def __init__(self, batch, size, dt, params, device="cpu"):
         super().__init__()
         self.size = size
         self.dt = dt
-        self.tau_mem = params['tauMem']
-        self.v_reset = params['vReset']
-        self.v_rest = params['vRest']
-        self.v_threshold = params['vThreshold']
-        self.v_0 = params['v0']
+        self.tau_mem = params["tauMem"]
+        self.v_reset = params["vReset"]
+        self.v_rest = params["vRest"]
+        self.v_threshold = params["vThreshold"]
+        self.v_0 = params["v0"]
         self.time_factor = dt / self.tau_mem
         self.spike_gradient = self.ATan.apply
         self.device = device
@@ -130,12 +133,12 @@ class LIFNeuron(nn.Module):
 class AlphaLIF(nn.Module):
     """LIF neuron with alpha-function synapse dynamics and refractory period."""
 
-    def __init__(self, batch, size, dt, params, device='cpu'):
+    def __init__(self, batch, size, dt, params, device="cpu"):
         super().__init__()
         self.size = size
         self.synapse = AlphaSynapse(batch, size, dt, params, device=device)
         self.neuron = LIFNeuron(batch, size, dt, params, device=device)
-        self.steps_refrac = int(params['tRefrac'] / dt)
+        self.steps_refrac = int(params["tRefrac"] / dt)
 
     def state_init(self):
         conductance, delay_buffer = self.synapse.state_init()
@@ -163,24 +166,31 @@ class TorchModel(nn.Module):
     the Drosophila connectome.
     """
 
-    def __init__(self, batch, size, dt, params, weights, device='cpu'):
+    def __init__(self, batch, size, dt, params, weights, device="cpu"):
         super().__init__()
         self.neurons = AlphaLIF(batch, size, dt, params, device=device)
         self.weights = weights
-        self.poisson = PoissonSpikeGenerator(dt, params['scalePoisson'], device=device)
-        self.scale = params['wScale']
+        self.poisson = PoissonSpikeGenerator(dt, params["scalePoisson"], device=device)
+        self.scale = params["wScale"]
 
     def state_init(self):
         return self.neurons.state_init()
 
-    def forward(self, rates, conductance, delay_buffer, spikes, v, refrac, generator=None):
+    def forward(
+        self, rates, conductance, delay_buffer, spikes, v, refrac, generator=None
+    ):
         spikes_input = self.poisson(rates, generator=generator)
         weighted_spikes = torch.matmul(spikes, self.weights.transpose(0, 1))
         conductance, delay_buffer, spikes, v, refrac = self.neurons(
             self.scale * (spikes_input + weighted_spikes),
-            conductance, delay_buffer, spikes, v, refrac,
+            conductance,
+            delay_buffer,
+            spikes,
+            v,
+            refrac,
         )
         return conductance, delay_buffer, spikes, v, refrac
+
 
 # ============================================================================
 # Data Utilities
@@ -220,7 +230,9 @@ class Data:
         data_conn = pd.read_csv(connections_path)
         data_coord = pd.read_csv(coordinates_path)
 
-        all_neurons = pd.concat([data_coord["root_id"], data_conn["pre_root_id"], data_conn["post_root_id"]])
+        all_neurons = pd.concat(
+            [data_coord["root_id"], data_conn["pre_root_id"], data_conn["post_root_id"]]
+        )
         all_neurons.drop_duplicates(inplace=True)
         # Cannot run inplace as it's a Series and pandas
         # wants to return a DataFrame, although we
@@ -238,13 +250,18 @@ class Data:
         # From https://github.com/funkelab/drosophila_neurotransmitters
         # TODO: Fill out the zeros?
         transmitters = {"GABA": -1, "ACH": 1, "GLUT": 0, "OCT": 0, "SER": 0, "DA": 0}
-        mapped_connections = data_conn["syn_count"] * data_conn["nt_type"].map(transmitters)
+        mapped_connections = data_conn["syn_count"] * data_conn["nt_type"].map(
+            transmitters
+        )
 
         self.weights = torch.sparse_coo_tensor(
             # This is ordered as [row, column].
             # Our input vector to the matrix is spike outputs (columns) and
             # the output should be
-            [data_conn["post_root_id"].map(self.flyid2i).to_list(), data_conn["pre_root_id"].map(self.flyid2i).to_list()],
+            [
+                data_conn["post_root_id"].map(self.flyid2i).to_list(),
+                data_conn["pre_root_id"].map(self.flyid2i).to_list(),
+            ],
             mapped_connections,
             (num_neurons, num_neurons),
         ).to(dtype=torch.float32, device=device_name)
@@ -281,12 +298,13 @@ class Data:
         max_coord = np.max(self.coords)
         self.coords = self.coords / max_coord
 
+
 def main():
     t_run_sec = 0.1
     t_sim_ms = t_run_sec * 1000.0
     num_steps = int(t_sim_ms / DT)
 
-    device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device_name = "cuda" if torch.cuda.is_available() else "cpu"
 
     data = Data(device_name)
     num_neurons = data.weights.shape[0]
@@ -322,7 +340,12 @@ def main():
     spike_sum = spike_sum.cpu()
     had_spikes = spike_sum[0] > 0
 
-    plt.scatter(data.coords[had_spikes, 0], data.coords[had_spikes, 1], c=spike_sum[0][had_spikes])
+    plt.scatter(
+        data.coords[had_spikes, 0],
+        data.coords[had_spikes, 1],
+        c=spike_sum[0][had_spikes],
+    )
     plt.show()
+
 
 main()
