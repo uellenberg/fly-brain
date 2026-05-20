@@ -14,19 +14,11 @@ Called by benchmark.py orchestrator.
 
 import pandas as pd
 import pyarrow  # noqa: F401  — must be imported before torch to avoid libarrow conflict
-import pickle
 import numpy as np
 import torch
 import torch.nn as nn
 from pathlib import Path
-from time import perf_counter as time
-import traceback
-
-from benchmark import (
-    T_RUN_VALUES_SEC, N_RUN_VALUES,
-    path_comp, path_con, path_res, path_wt,
-    get_experiment, print_summary_table, save_result_csv,
-)
+import matplotlib.pyplot as plt
 
 # ============================================================================
 # PyTorch Model Parameters (matching Brian2 default_params)
@@ -193,322 +185,144 @@ class TorchModel(nn.Module):
 # ============================================================================
 # Data Utilities
 # ============================================================================
-
-def get_hash_tables(comp_path):
-    """Build flywire ID <-> tensor index mappings from completeness CSV."""
-    df_comp = pd.read_csv(comp_path, index_col=0)
-    flyid2i = {j: i for i, j in enumerate(df_comp.index)}
-    i2flyid = {j: i for i, j in flyid2i.items()}
-    return flyid2i, i2flyid
-
-
-def get_weights(conn_path, comp_path, wt_dir, csr=True):
-    """Load or build sparse weight matrix from connectivity data.
-
-    Caches weight_coo.pkl / weight_csr.pkl in wt_dir for reuse.
+class Data:
     """
-    wt_dir = Path(wt_dir)
-    coo_path = wt_dir / 'weight_coo.pkl'
-    csr_path = wt_dir / 'weight_csr.pkl'
-
-    data_conn = pd.read_parquet(conn_path)
-    data_name = pd.read_csv(comp_path)
-    num_neurons = data_name.shape[0]
-
-    try:
-        with open(coo_path, 'rb') as f:
-            weight_coo = pickle.load(f)
-    except FileNotFoundError:
-        print('Weights not found, constructing COO weight matrix...')
-        idx = [
-            data_conn['Postsynaptic_Index'].to_list(),
-            data_conn['Presynaptic_Index'].to_list(),
-        ]
-        val = data_conn['Excitatory x Connectivity'].to_list()
-        weight_coo = torch.sparse_coo_tensor(
-            idx, val, (num_neurons, num_neurons)
-        ).to(torch.float32)
-        with open(coo_path, 'wb') as f:
-            pickle.dump(weight_coo, f)
-
-    if csr:
-        try:
-            with open(csr_path, 'rb') as f:
-                weight_csr = pickle.load(f)
-        except FileNotFoundError:
-            print('CSR weights not found, converting from COO...')
-            weight_csr = weight_coo.to_sparse_csr()
-            with open(csr_path, 'wb') as f:
-                pickle.dump(weight_csr, f)
-        return weight_csr
-    else:
-        return weight_coo
-
-# ============================================================================
-# Benchmark Functions
-# ============================================================================
-
-def run_single_benchmark(t_run_sec, n_run, experiment, logger,
-                         run_idx=None, total_runs=None):
+    Load or build sparse weight matrix from connectivity data.
     """
-    Run a single PyTorch benchmark with specified t_run and n_run.
 
-    Uses batch_size = n_run to run all trials in parallel on GPU.
+    weights: torch.Tensor
     """
-    device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
+    The sparse weight matrix.
+    Multiply by a vector of spikes to get a vector
+    of how much each neuron is affected by them.
+    """
+
+    flyid2i: dict[int, int]
+    """
+    Maps fly neuron IDs to a continuous index.
+    """
+
+    id2flyid: np.ndarray[tuple[int], np.dtype[np.int64]]
+    """
+    Maps the internal neuron index back to a fly neuron ID.
+    """
+
+    coords: np.ndarray[tuple[int, int], np.dtype[np.float32]]
+    """
+    Maps an internal neuron index (x, y) coordinates.
+    """
+
+    def __init__(self, device_name: str):
+        wt_dir = Path(__name__).parent.parent / "data"
+        connections_path = wt_dir / "connections_princeton.csv"
+        coordinates_path = wt_dir / "coordinates.csv"
+
+        data_conn = pd.read_csv(connections_path)
+        data_coord = pd.read_csv(coordinates_path)
+
+        all_neurons = pd.concat([data_coord["root_id"], data_conn["pre_root_id"], data_conn["post_root_id"]])
+        all_neurons.drop_duplicates(inplace=True)
+        # Cannot run inplace as it's a Series and pandas
+        # wants to return a DataFrame, although we
+        # need to convert it right back to a Series anyway.
+        all_neurons = all_neurons.reset_index()[0]
+
+        self.flyid2i = {v: int(k) for k, v in all_neurons.to_dict().items()}
+        self.i2flyid = all_neurons.to_list()
+        assert len(self.flyid2i) == len(self.i2flyid)
+
+        num_neurons = len(self.flyid2i)
+
+        # Extract weights.
+
+        # From https://github.com/funkelab/drosophila_neurotransmitters
+        # TODO: Fill out the zeros?
+        transmitters = {"GABA": -1, "ACH": 1, "GLUT": 0, "OCT": 0, "SER": 0, "DA": 0}
+        mapped_connections = data_conn["syn_count"] * data_conn["nt_type"].map(transmitters)
+
+        self.weights = torch.sparse_coo_tensor(
+            # This is ordered as [row, column].
+            # Our input vector to the matrix is spike outputs (columns) and
+            # the output should be
+            [data_conn["post_root_id"].map(self.flyid2i).to_list(), data_conn["pre_root_id"].map(self.flyid2i).to_list()],
+            mapped_connections,
+            (num_neurons, num_neurons),
+        ).to(dtype=torch.float32, device=device_name)
+
+        # Extract coordinates.
+
+        # position looks like [1 2 3] (some rows have multiple spaces)
+        data_coord["position"] = data_coord["position"].str.replace("[", "")
+        data_coord["position"] = data_coord["position"].str.replace("]", "")
+        data_coord["position"] = data_coord["position"].str.split(" +")
+        # Some
+
+        def fix_array(arr):
+            # Some entries are empty and will fail to parse
+            arr = [float(i or "0") for i in arr]
+            # We don't want the z coordinate for 2d plots (project downwards)
+            arr = arr[:2]
+
+            if len(arr) != 2:
+                return [0.0, 0.0]
+            return arr
+
+        data_coord["position"] = data_coord["position"].apply(fix_array)
+
+        # There are multiple positions per neuron
+        data_coord.drop_duplicates(subset="root_id", keep="first", inplace=True)
+        data_coord.set_index("root_id", inplace=True)
+
+        # Pandas returns an array of lists, we need to convert it all to a single ndarray
+        self.coords = np.stack(data_coord["position"].loc[self.i2flyid].to_numpy())
+        assert len(self.coords) == num_neurons
+
+        # Remap the long axis to be in the range [0, 1].
+        max_coord = np.max(self.coords)
+        self.coords = self.coords / max_coord
+
+def main():
+    t_run_sec = 0.1
     t_sim_ms = t_run_sec * 1000.0
     num_steps = int(t_sim_ms / DT)
 
-    exp_name = f'pytorch_t{t_run_sec}s_n{n_run}'
+    device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    run_info = f"[{run_idx}/{total_runs}] " if run_idx else ""
-    logger.log_raw("")
-    logger.log_raw("=" * 80)
-    logger.log(f"{run_info}BENCHMARK: t_run={t_run_sec}s, n_run={n_run}")
-    logger.log_raw("=" * 80)
-    logger.log(f"Device: {device_name.upper()}")
-    logger.log(f"Steps: {num_steps} (dt={DT}ms)")
-    logger.log(f"Experiment: {exp_name}")
+    data = Data(device_name)
+    num_neurons = data.weights.shape[0]
+    print(f"Loaded {num_neurons} neurons.")
 
-    stim_rate = experiment['stim_rate']
+    n_run = 1
 
-    timings = {}
-    results = {}
+    model = TorchModel(
+        n_run, num_neurons, DT, MODEL_PARAMS, data.weights, device=device_name
+    )
 
-    try:
-        # ===== Phase 1: ID mappings =====
-        t_mapping_start = time()
-        flyid2i, i2flyid = get_hash_tables(str(path_comp))
-        exc_indices = [flyid2i[n] for n in experiment['neu_exc']]
-        timings['id_mapping'] = time() - t_mapping_start
-        logger.log(f"ID mapping:         {timings['id_mapping']:.3f}s")
+    rates = torch.zeros(n_run, num_neurons, device=device_name)
+    # TODO: Replace with a properly chosen neuron (these are all random).
+    rates[:, [0, 374, 2648, 7462]] = 10000.0
+    # rates[:, exc_indices] = stim_rate
 
-        # ===== Phase 2: Load weights =====
-        logger.log("Loading weights...")
-        t_weights_start = time()
-        weights = get_weights(str(path_con), str(path_comp), str(path_wt), csr=True)
-        weights = weights.to(device=device_name)
-        num_neurons = weights.shape[0]
-        timings['weight_loading'] = time() - t_weights_start
-        logger.log(f"  Weight loading:   {timings['weight_loading']:.3f}s")
-        logger.log(f"  Neurons: {num_neurons}, Batch: {n_run}")
+    conductance, delay_buffer, spikes, v, refrac = model.state_init()
 
-        # ===== Phase 3: Create model =====
-        logger.log("Creating model...")
-        t_model_start = time()
-        model = TorchModel(
-            n_run, num_neurons, DT, MODEL_PARAMS, weights, device=device_name
-        )
-        conductance, delay_buffer, spikes, v, refrac = model.state_init()
-        timings['model_creation'] = time() - t_model_start
-        timings['model_setup_total'] = timings['weight_loading'] + timings['model_creation']
-        logger.log(f"  Model creation:   {timings['model_creation']:.3f}s")
-        logger.log(f"  Total setup:      {timings['model_setup_total']:.3f}s")
+    spike_sum = spikes.clone()
 
-        if device_name == 'cuda':
-            free, total = torch.cuda.mem_get_info(device_name)
-            vram_gb = (total - free) / 1024 ** 3
-            logger.log(f"  VRAM after setup: {vram_gb:.2f} GB")
-
-        # ===== Phase 4: Setup inputs =====
-        rates = torch.zeros(n_run, num_neurons, device=device_name)
-        rates[:, exc_indices] = stim_rate
-
-        # ===== Phase 5: Run simulation =====
-        logger.log(f"Running simulation ({num_steps} steps, {n_run} trial(s) batched)...")
-
-        spike_batch_idx = []
-        spike_neuron_idx = []
-        spike_timesteps = []
-
-        t_simulation_start = time()
-        with torch.no_grad():
-            for t_step in range(num_steps):
-                conductance, delay_buffer, spikes, v, refrac = model(
-                    rates, conductance, delay_buffer, spikes, v, refrac
-                )
-                spike_mask = spikes > 0
-                if spike_mask.any():
-                    b_idx, n_idx = spike_mask.nonzero(as_tuple=True)
-                    spike_batch_idx.append(b_idx.cpu())
-                    spike_neuron_idx.append(n_idx.cpu())
-                    spike_timesteps.append(
-                        torch.full((len(b_idx),), t_step, dtype=torch.long)
-                    )
-
-                if num_steps >= 10000 and (t_step + 1) % (num_steps // 10) == 0:
-                    elapsed = time() - t_simulation_start
-                    pct = (t_step + 1) / num_steps * 100
-                    logger.log(
-                        f"  Progress: {pct:.0f}% ({t_step+1}/{num_steps})"
-                        f" - {elapsed:.1f}s elapsed"
-                    )
-
-        if device_name == 'cuda':
-            torch.cuda.synchronize()
-
-        timings['simulation_total'] = time() - t_simulation_start
-        timings['simulation_avg_per_trial'] = timings['simulation_total'] / n_run
-        timings['device_build'] = 0.0
-        logger.log(f"  Simulation time:  {timings['simulation_total']:.3f}s")
-        logger.log(f"  Avg per trial:    {timings['simulation_avg_per_trial']:.3f}s")
-
-        if device_name == 'cuda':
-            free, total = torch.cuda.mem_get_info(device_name)
-            vram_gb = (total - free) / 1024 ** 3
-            logger.log(f"  VRAM used:        {vram_gb:.2f} GB")
-
-        # ===== Phase 6: Collect and save results =====
-        logger.log("Collecting results...")
-        t_collect_start = time()
-
-        if spike_batch_idx:
-            all_batch = torch.cat(spike_batch_idx).numpy()
-            all_neurons = torch.cat(spike_neuron_idx).numpy()
-            all_times_steps = torch.cat(spike_timesteps).numpy()
-
-            df = pd.DataFrame({
-                't': (all_times_steps * DT).tolist(),
-                'trial': all_batch.tolist(),
-                'flywire_id': [i2flyid[int(n)] for n in all_neurons],
-                'exp_name': exp_name,
-            })
-        else:
-            df = pd.DataFrame(
-                {'t': [], 'trial': [], 'flywire_id': [], 'exp_name': []}
+    # TODO: Profile this (it seems slower than expected).
+    with torch.no_grad():
+        for t_step in range(num_steps):
+            conductance, delay_buffer, spikes, v, refrac = model(
+                rates, conductance, delay_buffer, spikes, v, refrac
             )
 
-        timings['result_collection'] = time() - t_collect_start
+            spike_sum += spikes
 
-        t_save_start = time()
-        Path(path_res).mkdir(parents=True, exist_ok=True)
-        path_save = Path(path_res) / f'{exp_name}.parquet'
-        df.to_parquet(path_save, compression='brotli')
-        timings['result_save'] = time() - t_save_start
+            if t_step % 100 == 0 and t_step != 0:
+                print(f"Step {t_step}/{num_steps} done.")
 
-        logger.log(f"  Collection:       {timings['result_collection']:.3f}s")
-        logger.log(f"  Save to file:     {timings['result_save']:.3f}s")
-        logger.log(f"  Output file:      {path_save}")
+    spike_sum = spike_sum.cpu()
+    had_spikes = spike_sum[0] > 0
 
-        # ===== Calculate totals and metrics =====
-        timings['total_elapsed'] = (
-            timings['id_mapping']
-            + timings['model_setup_total']
-            + timings['simulation_total']
-            + timings['result_collection']
-            + timings['result_save']
-        )
+    plt.scatter(data.coords[had_spikes, 0], data.coords[had_spikes, 1], c=spike_sum[0][had_spikes])
+    plt.show()
 
-        total_simulated_time = t_run_sec * n_run
-        timings['realtime_ratio'] = (
-            total_simulated_time / timings['simulation_total']
-            if timings['simulation_total'] > 0 else float('inf')
-        )
-        timings['realtime_ratio_total'] = (
-            total_simulated_time / timings['total_elapsed']
-            if timings['total_elapsed'] > 0 else float('inf')
-        )
-
-        n_active = df['flywire_id'].nunique() if len(df) > 0 else 0
-        n_spikes = len(df)
-
-        results = {
-            't_run_sec': t_run_sec,
-            'n_run': n_run,
-            'n_active_neurons': n_active,
-            'n_spikes': n_spikes,
-            'status': 'success',
-            'timings': timings,
-        }
-
-        # ===== Summary =====
-        logger.log_raw("")
-        logger.log_raw("-" * 60)
-        logger.log("TIMING SUMMARY")
-        logger.log_raw("-" * 60)
-        logger.log(f"  Model setup:        {timings['model_setup_total']:>10.3f}s")
-        logger.log(f"  Simulation:         {timings['simulation_total']:>10.3f}s")
-        logger.log(f"  Result processing:  {timings['result_collection'] + timings['result_save']:>10.3f}s")
-        logger.log(f"  -----------------------------------------")
-        logger.log(f"  TOTAL ELAPSED:      {timings['total_elapsed']:>10.3f}s")
-        logger.log_raw("")
-        logger.log(f"  Simulated time:     {total_simulated_time:>10.1f}s ({n_run} x {t_run_sec}s)")
-        logger.log(f"  Realtime ratio (sim only): {timings['realtime_ratio']:>6.3f}x")
-        logger.log(f"  Realtime ratio (total):    {timings['realtime_ratio_total']:>6.3f}x")
-        logger.log_raw("")
-        logger.log(f"  Active neurons:     {n_active:>10d}")
-        logger.log(f"  Total spikes:       {n_spikes:>10d}")
-        logger.log_raw("-" * 60)
-
-    except Exception as e:
-        logger.log(f"ERROR: {str(e)}")
-        logger.log_raw(traceback.format_exc())
-        results = {
-            't_run_sec': t_run_sec,
-            'n_run': n_run,
-            'n_active_neurons': 0,
-            'n_spikes': 0,
-            'status': f'error: {str(e)}',
-            'timings': timings,
-        }
-
-    return results
-
-
-def run_all_benchmarks(t_run_values=None, n_run_values=None,
-                       experiment=None, logger=None):
-    """
-    Run all PyTorch benchmark combinations.
-
-    Args:
-        t_run_values: List of t_run durations in seconds, or None for all
-        n_run_values: List of n_run values to test, or None for all
-        experiment: experiment config dict from get_experiment()
-        logger: BenchmarkLogger instance
-    """
-    if t_run_values is None:
-        t_run_values = T_RUN_VALUES_SEC
-    if n_run_values is None:
-        n_run_values = N_RUN_VALUES
-    if experiment is None:
-        experiment = get_experiment()
-
-    device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
-    backend_name = f'PyTorch ({device_name.upper()})'
-
-    benchmarks = []
-    for n_run in n_run_values:
-        for t_run_sec in t_run_values:
-            benchmarks.append((t_run_sec, n_run))
-
-    total_runs = len(benchmarks)
-
-    logger.log_raw("")
-    logger.log_raw("=" * 80)
-    logger.log(f"BENCHMARK SUITE: {backend_name}")
-    logger.log_raw("=" * 80)
-    logger.log(f"Device: {device_name.upper()}")
-    if device_name == 'cuda':
-        logger.log(f"GPU: {torch.cuda.get_device_name(0)}")
-    logger.log(f"t_run values: {t_run_values} seconds")
-    logger.log(f"n_run values: {n_run_values}")
-    logger.log(f"Total benchmarks: {total_runs}")
-    logger.log_raw("=" * 80)
-
-    all_results = []
-
-    for run_idx, (t_run_sec, n_run) in enumerate(benchmarks, 1):
-        result = run_single_benchmark(
-            t_run_sec=t_run_sec,
-            n_run=n_run,
-            experiment=experiment,
-            logger=logger,
-            run_idx=run_idx,
-            total_runs=total_runs,
-        )
-        all_results.append(result)
-        save_result_csv(backend_name, result)
-
-    print_summary_table(all_results, backend_name, logger)
-
-    return all_results
+main()

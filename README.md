@@ -1,6 +1,6 @@
 # Emulation of the *Drosophila Fly* Brain
 
-Whole-brain leaky integrate-and-fire model of the adult fruit fly, built from the
+This if a fork of https://github.com/eonsystemspbc/fly-brain, Whole-brain leaky integrate-and-fire model of the adult fruit fly, built from the
 [FlyWire](https://flywire.ai/) connectome (~138k neurons, ~5M synapses).
 Activate and silence arbitrary neurons; observe downstream spike propagation.
 
@@ -11,24 +11,15 @@ entire adult Drosophila brain reveals insights into sensorimotor processing*](ht
 
 ## Usage
 
-With this computational model, one can manipulate the neural activity of a set of _Drosophila_ neurons.
-The output of the model is the spike times and rates of all affected neurons.
+Download `Connections (filtered)` and `Marked Neuron Coordinates` from [Flywire](https://codex.flywire.ai/api/download?dataset=fafb) and place them into `data/` as `connections_princeton.csv` and `coordinates.csv`.
 
-Two types of manipulations are currently implemented:
-- *Activation*:
-Neurons can be activated at a fixed frequency to model optogenetic activation.
-This triggers Poisson spiking in the target neurons. 
-Two sets of neurons with distinct frequencies can be defined.
-- *Silencing*:
-In addition to activation, a different set of neurons can be silenced to model optogenetic silencing.
-This sets all synaptic connections to and from those neurons to zero.
+To install dependencies, run:
+```
+conda env create -f environment.yml
+conda activate brain-fly
+```
 
-The entrypoint is [main.py](main.py), which parses CLI arguments and calls
-[code/benchmark.py](code/benchmark.py) -- the central orchestrator that dispatches
-to framework-specific runners:
-[run_brian2_cuda.py](code/run_brian2_cuda.py),
-[run_pytorch.py](code/run_pytorch.py), and
-[run_nestgpu.py](code/run_nestgpu.py).
+Once the data is downloaded, run with `python code/run_pytorch.py`. I had to run with `MPLBACKEND=TkAgg` for the plot to display.
 
 ```bash
 # Run all 4 frameworks with default durations (0.1s–1000s) and trials (1,4,8,16,32)

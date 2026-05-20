@@ -11,3 +11,6 @@ data/ground-truth-comparison.json
 # PyTorch cached weight matrices (generated from connectivity data)
 data/weight_coo.pkl
 data/weight_csr.pkl
+
+data/connections_princeton.csv
+data/coordinates.csv

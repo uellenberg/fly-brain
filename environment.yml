@@ -3,14 +3,13 @@ channels:
   - defaults
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.14
   - pip
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu126
-    - brian2cuda==1.0a7
     - torch
     - tqdm
-  - numpy=1.26.4
+  - numpy
   - jupyter
   - ipykernel
   - pandas
