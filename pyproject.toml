@@ -1,0 +1,15 @@
+[project]
+name = "brain-fly"
+version = "0.1.0"
+dependencies = [
+  "torch",
+  "tqdm",
+  "numpy",
+  "jupyter",
+  "ipykernel",
+  "pandas",
+  "joblib",
+  "pyarrow",
+  "scipy",
+  "matplotlib",
+]

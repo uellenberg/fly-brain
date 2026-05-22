@@ -21,6 +21,14 @@ conda activate brain-fly
 
 Once the data is downloaded, run with `python code/run_pytorch.py`. I had to run with `MPLBACKEND=TkAgg` for the plot to display.
 
+Or alternatively with `uv`:
+```
+uv venv
+source .venv/bin/activate
+uv sync
+uv python code/run_pytorch.py
+```
+
 ```bash
 # Run all 4 frameworks with default durations (0.1s–1000s) and trials (1,4,8,16,32)
 python main.py

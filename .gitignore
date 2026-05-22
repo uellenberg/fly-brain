@@ -14,3 +14,7 @@ data/weight_csr.pkl
 
 data/connections_princeton.csv
 data/coordinates.csv
+
+# uv, macOS specific
+uv.lock
+.DS_Store

@@ -16,6 +16,7 @@ import pandas as pd
 import pyarrow  # noqa: F401  — must be imported before torch to avoid libarrow conflict
 import numpy as np
 import torch
+import time
 import torch.nn as nn
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -169,7 +170,8 @@ class TorchModel(nn.Module):
     def __init__(self, batch, size, dt, params, weights, device="cpu"):
         super().__init__()
         self.neurons = AlphaLIF(batch, size, dt, params, device=device)
-        self.weights = weights
+        # self.weights = weights
+        self.weights_t = weights.transpose(0, 1).coalesce()
         self.poisson = PoissonSpikeGenerator(dt, params["scalePoisson"], device=device)
         self.scale = params["wScale"]
 
@@ -180,7 +182,8 @@ class TorchModel(nn.Module):
         self, rates, conductance, delay_buffer, spikes, v, refrac, generator=None
     ):
         spikes_input = self.poisson(rates, generator=generator)
-        weighted_spikes = torch.matmul(spikes, self.weights.transpose(0, 1))
+        # weighted_spikes = torch.matmul(spikes, self.weights.transpose(0, 1))
+        weighted_spikes = torch.sparse.mm(self.weights_t, spikes.T).T
         conductance, delay_buffer, spikes, v, refrac = self.neurons(
             self.scale * (spikes_input + weighted_spikes),
             conductance,
@@ -304,7 +307,13 @@ def main():
     t_sim_ms = t_run_sec * 1000.0
     num_steps = int(t_sim_ms / DT)
 
-    device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device_name = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device_name = "mps"
+    else:
+        device_name = "cpu"
+    print(f"Using device: {device_name}")
 
     data = Data(device_name)
     num_neurons = data.weights.shape[0]
@@ -326,6 +335,9 @@ def main():
     spike_sum = spikes.clone()
 
     # TODO: Profile this (it seems slower than expected).
+    start = time.time()
+    current = start
+    # with torch.inference_mode():
     with torch.no_grad():
         for t_step in range(num_steps):
             conductance, delay_buffer, spikes, v, refrac = model(
@@ -335,11 +347,12 @@ def main():
             spike_sum += spikes
 
             if t_step % 100 == 0 and t_step != 0:
-                print(f"Step {t_step}/{num_steps} done.")
+                print(f"Step {t_step}/{num_steps} done, took {time.time() - current} seconds")
+                current = time.time()
 
     spike_sum = spike_sum.cpu()
     had_spikes = spike_sum[0] > 0
-
+    print(f"took {time.time() - start} seconds overall")
     plt.scatter(
         data.coords[had_spikes, 0],
         data.coords[had_spikes, 1],
