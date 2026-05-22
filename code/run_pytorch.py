@@ -170,8 +170,7 @@ class TorchModel(nn.Module):
     def __init__(self, batch, size, dt, params, weights, device="cpu"):
         super().__init__()
         self.neurons = AlphaLIF(batch, size, dt, params, device=device)
-        # self.weights = weights
-        self.weights_t = weights.transpose(0, 1).coalesce()
+        self.weights = weights.coalesce()
         self.poisson = PoissonSpikeGenerator(dt, params["scalePoisson"], device=device)
         self.scale = params["wScale"]
 
@@ -182,8 +181,7 @@ class TorchModel(nn.Module):
         self, rates, conductance, delay_buffer, spikes, v, refrac, generator=None
     ):
         spikes_input = self.poisson(rates, generator=generator)
-        # weighted_spikes = torch.matmul(spikes, self.weights.transpose(0, 1))
-        weighted_spikes = torch.sparse.mm(self.weights_t, spikes.T).T
+        weighted_spikes = torch.sparse.mm(self.weights, spikes.T).T
         conductance, delay_buffer, spikes, v, refrac = self.neurons(
             self.scale * (spikes_input + weighted_spikes),
             conductance,
@@ -327,7 +325,7 @@ def main():
 
     rates = torch.zeros(n_run, num_neurons, device=device_name)
     # TODO: Replace with a properly chosen neuron (these are all random).
-    rates[:, [0, 374, 2648, 7462]] = 10000.0
+    rates[:, data.flyid2i[720575940633195148]] = 10000.0
     # rates[:, exc_indices] = stim_rate
 
     conductance, delay_buffer, spikes, v, refrac = model.state_init()
@@ -347,7 +345,9 @@ def main():
             spike_sum += spikes
 
             if t_step % 100 == 0 and t_step != 0:
-                print(f"Step {t_step}/{num_steps} done, took {time.time() - current} seconds")
+                print(
+                    f"Step {t_step}/{num_steps} done, took {time.time() - current} seconds"
+                )
                 current = time.time()
 
     spike_sum = spike_sum.cpu()
