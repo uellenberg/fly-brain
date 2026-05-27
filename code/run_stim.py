@@ -22,6 +22,11 @@ import argparse
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from plotting import (
+    ACTIVE_NEURON_DOT_SIZE,
+    HIGHLIGHT_NEURON_DOT_SIZE,
+    plot_brain_ghost,
+)
 
 # ============================================================================
 # PyTorch Model Parameters (matching Brian2 default_params)
@@ -465,36 +470,38 @@ def main():
 
     fig, ax = plt.subplots()
 
-    ax.scatter(
-        data.coords[:, 0],
-        data.coords[:, 1],
-        c="lightgray",
-        s=3,
-    )  # all neurons
+    plot_brain_ghost(ax, data.coords)
 
     if not show_video:
-        if mode == "visual": #normal
+        if mode == "visual":  # normal
             ax.scatter(
-            data.coords[had_spikes, 0],
-            data.coords[had_spikes, 1],
-            c=spike_sum[had_spikes],
-            s=3,
-        )
-        if mode == "olfactory": # then we want all spikes to be a little faded, and highlight the mbons
+                data.coords[had_spikes, 0],
+                data.coords[had_spikes, 1],
+                c=spike_sum[had_spikes],
+                s=ACTIVE_NEURON_DOT_SIZE,
+                linewidths=0,
+                zorder=1,
+            )
+        if mode == "olfactory":  # then we want all spikes to be a little faded, and highlight the mbons
             mbon_indices = [data.flyid2i[mbon_id] for mbon_id in mbon_ids]
             mbon_had_spikes = had_spikes[mbon_indices]
             ax.scatter(
                 data.coords[had_spikes, 0],
                 data.coords[had_spikes, 1],
                 c="darkgray",
-                s=3,
+                alpha=0.35,
+                s=ACTIVE_NEURON_DOT_SIZE,
+                linewidths=0,
+                zorder=1,
             )
             # plot the mbons that spiked with the spike_sum coloring
             ax.scatter(
                 data.coords[mbon_indices, 0][mbon_had_spikes],
                 data.coords[mbon_indices, 1][mbon_had_spikes],
                 c=spike_sum[mbon_indices][mbon_had_spikes],
-                s=3,
+                s=HIGHLIGHT_NEURON_DOT_SIZE,
+                linewidths=0,
+                zorder=2,
             )
             # count of mbons total, mbons that spiked, overall neurons that spiked
             print(f"spiking mbons / total mbons: {mbon_had_spikes.sum().item()} / {len(mbon_indices)}, total spiking neurons: {had_spikes.sum().item()}")
@@ -509,7 +516,9 @@ def main():
             c=spike_sum[had_spikes] * rate_mul,
             vmin=0,
             vmax=max_rate,
-            s=3,
+            s=ACTIVE_NEURON_DOT_SIZE,
+            linewidths=0,
+            zorder=1,
         )
         fig.colorbar(spike_plot, ax=ax)
 
