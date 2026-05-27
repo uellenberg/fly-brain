@@ -21,6 +21,7 @@ import torch.nn as nn
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib import animation
+from plotting import ACTIVE_NEURON_DOT_SIZE, plot_brain_ghost
 
 # ============================================================================
 # PyTorch Model Parameters (matching Brian2 default_params)
@@ -403,12 +404,7 @@ def main():
 
     fig, ax = plt.subplots()
 
-    ax.scatter(
-        data.coords[:, 0],
-        data.coords[:, 1],
-        c="lightgray",
-        s=3,
-    )  # all neurons
+    plot_brain_ghost(ax, data.coords)
 
     # The number of seconds we count spikes in for each spike_frame.
     rate_mul = 1 / (visualization_acc_window * steps_per_frame * DT / 1000)
@@ -421,7 +417,9 @@ def main():
         c=spike_sum[had_spikes] * rate_mul,
         vmin=0,
         vmax=max_rate,
-        s=3,
+        s=ACTIVE_NEURON_DOT_SIZE,
+        linewidths=0,
+        zorder=1,
     )
 
     fig.colorbar(spike_plot, ax=ax)
