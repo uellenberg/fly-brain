@@ -20,6 +20,7 @@ import time
 import torch.nn as nn
 from pathlib import Path
 import matplotlib.pyplot as plt
+from matplotlib import animation
 
 # ============================================================================
 # PyTorch Model Parameters (matching Brian2 default_params)
@@ -299,22 +300,32 @@ class Data:
         max_coord = np.max(self.coords)
         self.coords = self.coords / max_coord
 
+
 # helpers
 def stimulate_downstream(data, root, levels=3):
     downstream = set([root])
     for _ in range(levels):
         downstream_tensor = torch.tensor(list(downstream), device=data.weights.device)
         downstream = set(
-            data.weights.coalesce().indices()[0][
+            data.weights.coalesce()
+            .indices()[0][
                 torch.isin(data.weights.coalesce().indices()[1], downstream_tensor)
-            ].cpu()
+            ]
+            .cpu()
         )
     return list(downstream)
+
 
 def main():
     t_run_sec = 0.1
     t_sim_ms = t_run_sec * 1000.0
     num_steps = int(t_sim_ms / DT)
+    # How many steps should run between
+    # every displayed frame.
+    steps_per_frame = 10
+    # How many frames to accumulate
+    # for the estimated rate.
+    visualization_acc_window = 50
 
     if torch.cuda.is_available():
         device_name = "cuda"
@@ -338,15 +349,21 @@ def main():
     # TODO: Replace with a properly chosen neuron (these are all random).
     # rates[:, data.flyid2i[720575940633195148]] = 10000.0
     # rates[:, exc_indices] = stim_rate
-    root = data.flyid2i[720575940641130368] # visual input neuron
+    root = data.flyid2i[720575940641130368]  # visual input neuron
     downstream = stimulate_downstream(data, root, levels=3)
     print(f"Stimulating {len(downstream)} neurons downstream of {root}.")
-    rates[:, downstream] = 100.0 # some sort of low number
-    rates[:, root] = 1000000.0 # some sort of high number
+    rates[:, downstream] = 100.0  # some sort of low number
+    rates[:, root] = 10000.0  # some sort of high number
 
     conductance, delay_buffer, spikes, v, refrac = model.state_init()
 
     spike_sum = spikes.clone()
+    # Total spikes at each timestep.
+    spike_sums = []
+    # Spikes in a visualization_acc_window window
+    # at each timestep (effectively a constant multiple
+    # of spike rate).
+    spike_frames = []
 
     # TODO: Profile this (it seems slower than expected).
     start = time.time()
@@ -360,28 +377,74 @@ def main():
 
             spike_sum += spikes
 
+            if t_step != 0 and t_step % steps_per_frame == 0:
+                spike_sums.append(spike_sum.clone())
+
+                frame_data = spike_sum.clone()
+
+                frame_idx = t_step // steps_per_frame
+                if frame_idx >= visualization_acc_window:
+                    frame_data -= spike_sums[frame_idx - visualization_acc_window]
+                spike_frames.append(frame_data)
+
             if t_step % (1000 * t_run_sec) == 0 and t_step != 0:
                 print(
                     f"Step {t_step}/{num_steps} done, took {time.time() - current} seconds"
                 )
                 current = time.time()
 
+    # Force everything onto the cpu for processing.
     spike_sum = spike_sum.cpu()
-    had_spikes = spike_sum[0] > 0
+    spike_frames = [f.cpu() for f in spike_frames]
+
+    spike_sum = spike_sum[0]
+    had_spikes = spike_sum > 0
     print(f"took {time.time() - start} seconds overall")
     print(f"number of neurons that spiked: {had_spikes.sum().item()}")
-    plt.scatter(
+
+    fig, ax = plt.subplots()
+
+    ax.scatter(
         data.coords[:, 0],
         data.coords[:, 1],
         c="lightgray",
-        s=10,
-    ) # all neurons
-    plt.scatter(
+        s=3,
+    )  # all neurons
+
+    # The number of seconds we count spikes in for each spike_frame.
+    rate_mul = 1 / (visualization_acc_window * steps_per_frame * DT / 1000)
+    # Add 1 to prevent clipping
+    max_rate = np.max(spike_frames) * rate_mul + 1
+
+    spike_plot = ax.scatter(
         data.coords[had_spikes, 0],
         data.coords[had_spikes, 1],
-        c=spike_sum[0][had_spikes],
-        s=10
+        c=spike_sum[had_spikes] * rate_mul,
+        vmin=0,
+        vmax=max_rate,
+        s=3,
     )
+
+    fig.colorbar(spike_plot, ax=ax)
+
+    def show_frame(frame):
+        ax.set_title(f"Brain at t = {frame * steps_per_frame * DT / 1000:.2f}s")
+
+        frame_spike_sum = spike_frames[frame][0]
+        frame_had_spikes = frame_spike_sum > 0
+
+        spike_plot.set_offsets(data.coords[frame_had_spikes])
+        spike_plot.set_array(frame_spike_sum[frame_had_spikes] * rate_mul)
+
+        return (
+            ax,
+            spike_plot,
+        )
+
+    ani = animation.FuncAnimation(
+        fig=fig, func=show_frame, frames=len(spike_frames), interval=DT
+    )
+
     plt.show()
 
 
