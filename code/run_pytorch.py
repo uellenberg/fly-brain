@@ -299,6 +299,17 @@ class Data:
         max_coord = np.max(self.coords)
         self.coords = self.coords / max_coord
 
+# helpers
+def stimulate_downstream(data, root, levels=3):
+    downstream = set([root])
+    for _ in range(levels):
+        downstream_tensor = torch.tensor(list(downstream), device=data.weights.device)
+        downstream = set(
+            data.weights.coalesce().indices()[0][
+                torch.isin(data.weights.coalesce().indices()[1], downstream_tensor)
+            ].cpu()
+        )
+    return list(downstream)
 
 def main():
     t_run_sec = 0.1
@@ -325,8 +336,13 @@ def main():
 
     rates = torch.zeros(n_run, num_neurons, device=device_name)
     # TODO: Replace with a properly chosen neuron (these are all random).
-    rates[:, data.flyid2i[720575940633195148]] = 10000.0
+    # rates[:, data.flyid2i[720575940633195148]] = 10000.0
     # rates[:, exc_indices] = stim_rate
+    root = data.flyid2i[720575940641130368] # visual input neuron
+    downstream = stimulate_downstream(data, root, levels=3)
+    print(f"Stimulating {len(downstream)} neurons downstream of {root}.")
+    rates[:, downstream] = 100.0 # some sort of low number
+    rates[:, root] = 1000000.0 # some sort of high number
 
     conductance, delay_buffer, spikes, v, refrac = model.state_init()
 
@@ -344,7 +360,7 @@ def main():
 
             spike_sum += spikes
 
-            if t_step % 100 == 0 and t_step != 0:
+            if t_step % (1000 * t_run_sec) == 0 and t_step != 0:
                 print(
                     f"Step {t_step}/{num_steps} done, took {time.time() - current} seconds"
                 )
@@ -353,10 +369,18 @@ def main():
     spike_sum = spike_sum.cpu()
     had_spikes = spike_sum[0] > 0
     print(f"took {time.time() - start} seconds overall")
+    print(f"number of neurons that spiked: {had_spikes.sum().item()}")
+    plt.scatter(
+        data.coords[:, 0],
+        data.coords[:, 1],
+        c="lightgray",
+        s=10,
+    ) # all neurons
     plt.scatter(
         data.coords[had_spikes, 0],
         data.coords[had_spikes, 1],
         c=spike_sum[0][had_spikes],
+        s=10
     )
     plt.show()
 
