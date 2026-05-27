@@ -365,7 +365,6 @@ def main():
     # of spike rate).
     spike_frames = []
 
-    # TODO: Profile this (it seems slower than expected).
     start = time.time()
     current = start
     # with torch.inference_mode():

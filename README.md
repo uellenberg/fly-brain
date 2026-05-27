@@ -11,7 +11,7 @@ entire adult Drosophila brain reveals insights into sensorimotor processing*](ht
 
 ## Usage
 
-Download `Connections (filtered)` and `Marked Neuron Coordinates` from [Flywire](https://codex.flywire.ai/api/download?dataset=fafb) and place them into `data/` as `connections_princeton.csv` and `coordinates.csv`.
+Download `Connections (filtered)`, `Marked Neuron Coordinates`, `Classification/Hierarchical Annotations` from [Flywire](https://codex.flywire.ai/api/download?dataset=fafb) and place them into `data/` as `connections_princeton.csv`, `coordinates.csv`, `classification.csv`.
 
 To install dependencies, run:
 ```
