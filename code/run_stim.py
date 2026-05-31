@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 from plotting import (
     ACTIVE_NEURON_DOT_SIZE,
+    ACTIVE_NEURON_ALPHA,
     HIGHLIGHT_NEURON_DOT_SIZE,
     plot_brain_ghost,
 )
@@ -607,6 +608,7 @@ def main():
                 data.coords[had_spikes, 1],
                 c=spike_sum[had_spikes],
                 s=ACTIVE_NEURON_DOT_SIZE,
+                alpha=ACTIVE_NEURON_ALPHA,
                 linewidths=0,
                 zorder=1,
             )
@@ -619,8 +621,8 @@ def main():
                 data.coords[had_spikes, 0],
                 data.coords[had_spikes, 1],
                 c="darkgray",
-                alpha=0.35,
                 s=ACTIVE_NEURON_DOT_SIZE,
+                alpha=0.35 * ACTIVE_NEURON_ALPHA,
                 linewidths=0,
                 zorder=1,
             )
@@ -630,6 +632,7 @@ def main():
                 data.coords[mbon_indices, 1][mbon_had_spikes],
                 c=spike_sum[mbon_indices][mbon_had_spikes],
                 s=HIGHLIGHT_NEURON_DOT_SIZE,
+                alpha=ACTIVE_NEURON_ALPHA,
                 linewidths=0,
                 zorder=2,
             )
@@ -649,6 +652,7 @@ def main():
             vmin=0,
             vmax=max_rate,
             s=ACTIVE_NEURON_DOT_SIZE,
+            alpha=ACTIVE_NEURON_ALPHA,
             linewidths=0,
             zorder=1,
         )
