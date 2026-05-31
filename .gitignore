@@ -17,3 +17,5 @@ data/*
 # uv, macOS specific
 uv.lock
 .DS_Store
+
+brain.mp4

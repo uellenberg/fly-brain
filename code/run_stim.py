@@ -43,6 +43,19 @@ MODEL_PARAMS = {
     "tRefrac": 2.2,  # ms
     "scalePoisson": 250,
     "wScale": 0.275,
+    # TODO: Fiddle with these values.
+    # How much the history should decay after a second (multiplier).
+    "ltpHistoryDecay": 0.1,
+    # How much the LTP connections should decay after a second (multiplier).
+    "ltpDecay": 0.1,
+    # The maximum amount LTP can multiply a weight by.
+    # The true max is always one plus this value, since it's
+    # calculated as weights + ltp * weights.
+    "ltpMax": 1.0,
+    # How much to multiply changes in conductance by to get the
+    # ltp multiplier (e.g., 1 / (# of spikes * # of connections * wScale) that
+    # should cause the synapse strangth to instantly double).
+    "ltpConductanceMul": 1.0 / (10 * 0.275),
 }
 
 DT = 0.1  # Simulation timestep in ms (matches Brian2 defaultclock.dt)
@@ -174,12 +187,30 @@ class TorchModel(nn.Module):
     the Drosophila connectome.
     """
 
-    def __init__(self, batch, size, dt, params, weights, device="cpu"):
+    def __init__(
+        self, batch, size, dt, params, weights, enable_ltp: bool, device="cpu"
+    ):
         super().__init__()
         self.neurons = AlphaLIF(batch, size, dt, params, device=device)
         self.weights = weights.coalesce()
+        # A sum of recent spiking activity, such that each
+        # item in the matrix contains the # of spikes from
+        # the presynaptic neuron * the weight of the connection,
+        # weighted so that older spikes are smaller.
+        self.w_history = torch.zeros_like(self.weights).coalesce()
+        # A weight multiplier for each connection, that's increased
+        # when the connection causes the neuron to spike and decays
+        # over time.
+        self.ltp_mul = torch.zeros_like(self.weights).coalesce()
         self.poisson = PoissonSpikeGenerator(dt, params["scalePoisson"], device=device)
         self.scale = params["wScale"]
+        # History decay is for one second, so we need to adjust it to
+        # work for the timestep size.
+        self.history_decay = params["ltpHistoryDecay"] ** (DT / 1000)
+        self.ltp_decay = params["ltpDecay"] ** (DT / 1000)
+        self.ltp_max = params["ltpMax"]
+        self.ltp_conductance_mul = params["ltpConductanceMul"]
+        self.enable_ltp = enable_ltp
 
     def state_init(self):
         return self.neurons.state_init()
@@ -187,9 +218,42 @@ class TorchModel(nn.Module):
     def forward(
         self, rates, conductance, delay_buffer, spikes, v, refrac, generator=None
     ):
+        if self.enable_ltp:
+            self.w_history = self.w_history * self.history_decay
+            self.ltp_mul = self.ltp_mul * self.ltp_decay
+
+            # We need to count how much input each neuron is receiving
+            # and from which neurons they're receiving it from.
+            # That way, when a neuron does spike, we can "credit" the ones
+            # that sent the most signals and increase their connections.
+            indices = self.weights.indices()
+            values = self.weights.values()
+
+            # indicies[1] is a list of all the column indices, so this
+            # multiplies the vector with each row, row-by-row.
+            #
+            # The original code is implemented with multiple simultaneous
+            # runs in mind, and so spike's first axis is the run index.
+            # For simplicity, I'm not implementing that for LTP, so this
+            # will only use the first run and will fail if used with multiple.
+            values *= spikes[0][indices[1]] * self.scale
+
+            add_matrix = torch.sparse_coo_tensor(
+                indices, values, self.weights.shape, is_coalesced=True
+            )
+            self.w_history += add_matrix
+
+            self.w_history = self.w_history.coalesce()
+
         spikes_input = self.poisson(rates, generator=generator)
-        weighted_spikes = torch.sparse.mm(self.weights, spikes.T).T
-        conductance, delay_buffer, spikes, v, refrac = self.neurons(
+
+        if self.enable_ltp:
+            new_weights = self.weights + self.weights * self.ltp_mul
+            weighted_spikes = torch.sparse.mm(new_weights, spikes.T).T
+        else:
+            weighted_spikes = torch.sparse.mm(self.weights, spikes.T).T
+
+        conductance, delay_buffer, new_spikes, v, refrac = self.neurons(
             self.scale * (spikes_input + weighted_spikes),
             conductance,
             delay_buffer,
@@ -197,7 +261,37 @@ class TorchModel(nn.Module):
             v,
             refrac,
         )
-        return conductance, delay_buffer, spikes, v, refrac
+
+        if self.enable_ltp:
+            # We need to strengthen the connections between neurons
+            # that just spiked and the neurons that caused them to spike.
+            indices = self.w_history.indices()
+            values = self.w_history.values()
+
+            # We only want to strengthen the rows (connections to
+            # the neuron that just spiked), which indices[0] corresponds
+            # to.
+            #
+            # See the comment above for why this needs to be new_spikes[0].
+            values *= new_spikes[0][indices[0]] * self.ltp_conductance_mul
+
+            add_matrix = torch.sparse_coo_tensor(
+                indices, values, self.weights.shape, is_coalesced=True
+            )
+            self.ltp_mul += add_matrix
+            self.ltp_mul = self.ltp_mul.coalesce()
+
+            # Clamp doesn't work on sparse tensors, so we need to break
+            # it out to do it.
+            indices = self.ltp_mul.indices()
+            values = self.ltp_mul.values()
+            torch.clamp(values, max=self.ltp_max)
+
+            self.ltp_mul = torch.sparse_coo_tensor(
+                indices, values, self.weights.shape, is_coalesced=True
+            )
+
+        return conductance, delay_buffer, new_spikes, v, refrac
 
 
 # ============================================================================
@@ -321,33 +415,51 @@ def search_downstream(data, root, levels=3):
         )
     return list(downstream)
 
+
 # Extract cells from hierarchy
 # We want to observe the change in connection between Kenyon cells and MBON cells
 def extract_ids(ann):
 
     # Kenyon cells are the cells that get activated from a scent.
     # A given scent usually activates a unique subset of around 25 Kenyon cells.
-    KC_IDS = ann.loc[
-        ann["class"].str.contains("Kenyon", na=False), "root_id"
-    ].astype(np.int64).values
+    KC_IDS = (
+        ann.loc[ann["class"].str.contains("Kenyon", na=False), "root_id"]
+        .astype(np.int64)
+        .values
+    )
 
     # MBONs are the cells where memory becomes behaviorally meaningful.
     # MBONs take as input the output of Kenyon cells and have their own behavior/current change as a result.
-    MBON_IDS = ann.loc[
-        ann["class"].str.contains("MBON", na=False), "root_id"
-    ].astype(np.int64).values
+    MBON_IDS = (
+        ann.loc[ann["class"].str.contains("MBON", na=False), "root_id"]
+        .astype(np.int64)
+        .values
+    )
 
     # reward dopamine, not currently used but could be
-    PAM_IDS = ann.loc[
-        ann["class"].str.contains("PAM", na=False) | ann["sub_class"].str.contains("PAM", na=False), "root_id"
-    ].astype(np.int64).values
+    PAM_IDS = (
+        ann.loc[
+            ann["class"].str.contains("PAM", na=False)
+            | ann["sub_class"].str.contains("PAM", na=False),
+            "root_id",
+        ]
+        .astype(np.int64)
+        .values
+    )
 
     # punishment dopamine, not currently used but could be
-    PPL1_IDS = ann.loc[
-        ann["class"].str.contains("PPL1", na=False) | ann["sub_class"].str.contains("PPL1", na=False), "root_id"
-    ].astype(np.int64).values
+    PPL1_IDS = (
+        ann.loc[
+            ann["class"].str.contains("PPL1", na=False)
+            | ann["sub_class"].str.contains("PPL1", na=False),
+            "root_id",
+        ]
+        .astype(np.int64)
+        .values
+    )
 
     return KC_IDS, MBON_IDS, PAM_IDS, PPL1_IDS
+
 
 # Randomly generate odor by randomly choosing a small set of Kenyon cells to activate.
 def generate_odor(n_kc, active_fraction=0.05, strength=1.0):
@@ -359,21 +471,29 @@ def generate_odor(n_kc, active_fraction=0.05, strength=1.0):
 
 def main():
     # parse args to get show_video
-    parser = argparse.ArgumentParser(description="Run fly brain simulation with stimulus.")
+    parser = argparse.ArgumentParser(
+        description="Run fly brain simulation with stimulus."
+    )
     parser.add_argument(
         "--show_video",
         action="store_true",
         help="Whether to show the video of the simulation (can be slow).",
     )
     parser.add_argument(
-        "--mode", # should be either visual or olfactory
+        "--mode",  # should be either visual or olfactory
         type=str,
         default="visual",
         help="The type of stimulus to show (visual or olfactory).",
     )
+    parser.add_argument(
+        "--enable-ltp",
+        action="store_true",
+        help="Whether to enable long-term potentiation.",
+    )
     args = parser.parse_args()
     show_video = args.show_video
     mode = args.mode
+    enable_ltp = args.enable_ltp
 
     t_run_sec = 0.1
     t_sim_ms = t_run_sec * 1000.0
@@ -400,7 +520,13 @@ def main():
     n_run = 1
 
     model = TorchModel(
-        n_run, num_neurons, DT, MODEL_PARAMS, data.weights, device=device_name
+        n_run,
+        num_neurons,
+        DT,
+        MODEL_PARAMS,
+        data.weights,
+        device=device_name,
+        enable_ltp=enable_ltp,
     )
 
     rates = torch.zeros(n_run, num_neurons, device=device_name)
@@ -415,7 +541,9 @@ def main():
         rates[:, downstream] = 100.0  # some sort of low number
         rates[:, root] = 10000.0  # some sort of high number
     elif mode == "olfactory":
-        classifications = pd.read_csv(Path(__name__).parent.parent / "data" / "classification.csv")
+        classifications = pd.read_csv(
+            Path(__name__).parent.parent / "data" / "classification.csv"
+        )
         kc_ids, mbon_ids, _, _ = extract_ids(classifications)
         # generate a random odor by activating a random subset of Kenyon cells
         odor = generate_odor(len(kc_ids), strength=10000).to(device_name)
@@ -482,7 +610,9 @@ def main():
                 linewidths=0,
                 zorder=1,
             )
-        if mode == "olfactory":  # then we want all spikes to be a little faded, and highlight the mbons
+        if (
+            mode == "olfactory"
+        ):  # then we want all spikes to be a little faded, and highlight the mbons
             mbon_indices = [data.flyid2i[mbon_id] for mbon_id in mbon_ids]
             mbon_had_spikes = had_spikes[mbon_indices]
             ax.scatter(
@@ -504,7 +634,9 @@ def main():
                 zorder=2,
             )
             # count of mbons total, mbons that spiked, overall neurons that spiked
-            print(f"spiking mbons / total mbons: {mbon_had_spikes.sum().item()} / {len(mbon_indices)}, total spiking neurons: {had_spikes.sum().item()}")
+            print(
+                f"spiking mbons / total mbons: {mbon_had_spikes.sum().item()} / {len(mbon_indices)}, total spiking neurons: {had_spikes.sum().item()}"
+            )
     else:
         # The number of seconds we count spikes in for each spike_frame.
         rate_mul = 1 / (visualization_acc_window * steps_per_frame * DT / 1000)
@@ -539,6 +671,8 @@ def main():
         ani = animation.FuncAnimation(
             fig=fig, func=show_frame, frames=len(spike_frames), interval=DT
         )
+
+        ani.save("brain.mp4", writer=animation.FFMpegWriter(fps=10))
 
     plt.show()
 
