@@ -558,7 +558,6 @@ def run_trial_and_collect(model, rates, kc_indices, mbon_indices, num_steps, rec
             active_kcs_seen.update(kc_indices_tensor[active_kc_mask].cpu().tolist())
             mbon_spike_sum += spikes[0, mbon_indices_tensor]
 
-            # CHANGED: optionally save frames for video.
             if record_video and t_step != 0 and t_step % steps_per_frame == 0:
                 spike_sums.append(spike_sum.clone())
 

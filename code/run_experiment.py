@@ -184,15 +184,24 @@ def run():
     print("Target MBON post-learning activity:")
     print(post[target_indices].detach().numpy())
 
+    plt.figure()
+
+    target_indices = torch.where(target_mbon_mask > 0)[0]
+    pre_target = pre[target_indices].detach().numpy()
+    post_target = post[target_indices].detach().numpy()
+    target_mbon_root_ids = [str(MBON_IDS[i]) for i in target_indices.numpy()]
+    x = np.arange(len(target_indices))
+
+    # Bars instead of connected line because MBON cells are discrete, not continuous.
+    plt.bar(x - 0.2, pre_target, width=0.4, label="pre")
+    plt.bar(x + 0.2, post_target, width=0.4, label="post")
+    plt.xticks(x, target_mbon_root_ids, rotation=90)
+
     plt.xlabel("MBON root ID")
     plt.ylabel("Input synaptic current into each MBON")
-
-    # Bars instead of connected line because MBON cells are discrete, not continuous
-    x = np.arange(len(pre[target_indices].detach().numpy()))
-    plt.bar(x - 0.2, pre[target_indices].detach().numpy(), width=0.4, label="pre")
-    plt.bar(x + 0.2, post[target_indices].detach().numpy(), width=0.4, label="post")
     plt.legend()
     plt.title("Synaptic current between KC and target MBON cells pre vs post learning")
+    plt.tight_layout()
     plt.show()
 
 
