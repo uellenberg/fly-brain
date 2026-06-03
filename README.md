@@ -29,6 +29,43 @@ uv sync
 uv python code/run_pytorch.py
 ```
 
+### Olfactory learning simulation
+
+`code/run_simulation.py` runs the odor-learning experiment. It expects the
+FlyWire CSV downloads in gzip form:
+
+- `data/connections_princeton.csv.gz`
+- `data/coordinates.csv.gz`
+- `data/classification.csv.gz`
+- `data/consolidated_cell_types.csv.gz`
+- `data/MBONs.csv`
+
+Odors are selected from `code/odorant_checklist.csv`, which records the
+odorant, DoOR responding unit, receptor, glomerulus, FlyWire ORN type, DoOR
+response value, and the rationale for using or rejecting it. The default is
+`farnesol`, because it is the strongest DoOR ligand for `Or83c` and has the
+clean mapping `Or83c -> DC3 -> ORN_DC3`.
+
+```bash
+python code/run_simulation.py --list_odorants
+python code/run_simulation.py --odorant farnesol --dopamine_type reward
+python code/run_simulation.py --odorant geosmin --dopamine_type punishment
+```
+
+For a Modal T4 GPU run:
+
+```bash
+modal run code/modal_run_simulation.py --odorant farnesol --dopamine-type reward
+modal run code/modal_run_simulation.py --odorant geosmin --dopamine-type punishment
+```
+
+For a 10-seed Modal T4 sweep across farnesol/geosmin reward/punishment:
+
+```bash
+modal run code/modal_seed_sweep.py --n-seeds 10 --seed-start 0
+modal run code/modal_seed_sweep.py --conditions farnesol:punishment --max-odor-orn-rate 5000 --n-seeds 10 --seed-start 0
+```
+
 ```bash
 # Run all 4 frameworks with default durations (0.1s–1000s) and trials (1,4,8,16,32)
 python main.py

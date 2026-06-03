@@ -13,6 +13,7 @@ Called by benchmark.py orchestrator.
 """
 
 import pandas as pd
+import json
 import pyarrow  # noqa: F401  — must be imported before torch to avoid libarrow conflict
 import numpy as np
 import torch
@@ -62,13 +63,14 @@ MODEL_PARAMS = {
 DT = 0.1  # Simulation timestep in ms (matches Brian2 defaultclock.dt)
 N_TRAINING_TRIALS = 10
 LTD_RATE = 0.05
-DOPAMINE_TYPE = "reward"  # Toggle betwen reward and punishment
+DOPAMINE_TYPE = "reward"  # Default can be changed with --dopamine_type.
 AVOIDANCE_MBON_TYPES = {"MBON01", "MBON03", "MBON04", "MBON05"}
 APPROACH_MBON_TYPES = {"MBON08", "MBON09", "MBON11", "MBON12", "MBON15", "MBON16", "MBON17", "MBON18","MBON19"}
-ODOR_ORN_TYPE = "ORN_DC3"
-DOOR_RESPONSE_VALUE = 0.078
-ORN_RATE_SCALE = 100000.0   # Tune this if no KCs spike or too many neurons spike.
-ODOR_ORN_RATE = DOOR_RESPONSE_VALUE * ORN_RATE_SCALE
+DEFAULT_ODORANT_KEY = "farnesol"
+ODORANT_CHECKLIST_PATH = Path(__file__).with_name("odorant_checklist.csv")
+# With dt=0.1 ms, 10000 Hz is the largest rate that keeps the Bernoulli
+# spike probability <= 1.0.
+MAX_ODOR_ORN_RATE = 10000.0
 
 SEED = 123
 
@@ -506,6 +508,52 @@ def get_orn_indices_for_type(data, orn_type):
     return orn_indices
 
 
+def load_odorant_checklist():
+    checklist = pd.read_csv(ODORANT_CHECKLIST_PATH)
+    required_columns = {
+        "key",
+        "odorant_name",
+        "door_responding_unit",
+        "receptor",
+        "glomerulus",
+        "flywire_orn_type",
+        "door_response_value",
+    }
+    missing_columns = required_columns - set(checklist.columns)
+    if missing_columns:
+        raise ValueError(
+            f"{ODORANT_CHECKLIST_PATH} is missing columns: {sorted(missing_columns)}"
+        )
+    return checklist
+
+
+def select_odorant_config(odorant_key):
+    checklist = load_odorant_checklist()
+    matching_rows = checklist[checklist["key"] == odorant_key]
+
+    if matching_rows.empty:
+        available = ", ".join(checklist["key"].sort_values().tolist())
+        raise ValueError(
+            f"Unknown odorant '{odorant_key}'. Available odorants: {available}"
+        )
+
+    return matching_rows.iloc[0].to_dict()
+
+
+def print_odorant_checklist():
+    checklist = load_odorant_checklist()
+    display_columns = [
+        "key",
+        "odorant_name",
+        "door_responding_unit",
+        "glomerulus",
+        "flywire_orn_type",
+        "door_response_value",
+        "selection_status",
+    ]
+    print(checklist[display_columns].to_string(index=False))
+
+
 def build_mbon_type_indices(data, MBON_IDS, target_mbon_types):
     mbons = pd.read_csv(Path(__name__).parent.parent / "data" / "MBONs.csv")
     target_indices = []
@@ -572,11 +620,18 @@ def run_trial_and_collect(model, rates, kc_indices, mbon_indices, num_steps, rec
     return active_kcs_seen, mbon_spike_sum.cpu(), spike_sum.cpu(), spike_frames
 
 
-def apply_ltd_to_model_weights(model, active_kc_indices, target_mbon_indices, ltd_rate=0.05):
+def apply_ltd_to_model_weights(
+    model,
+    active_kc_indices,
+    target_mbon_indices,
+    ltd_rate=0.05,
+    verbose=True,
+):
     # Weakens active KC -> target MBON connections.
     # KC -> MBON weights are weights[mbon_index, kc_index]
     if not active_kc_indices:
-        print("No active KCs this trial; no LTD applied.")
+        if verbose:
+            print("No active KCs this trial; no LTD applied.")
         return
 
     W = model.weights.coalesce()
@@ -594,7 +649,8 @@ def apply_ltd_to_model_weights(model, active_kc_indices, target_mbon_indices, lt
     values[ltd_mask] *= 1.0 - ltd_rate
     model.weights = torch.sparse_coo_tensor(indices, values, W.shape, device=values.device).coalesce()
 
-    print(f"Weakened {int(ltd_mask.sum().item())} KC -> MBON weights.")
+    if verbose:
+        print(f"Weakened {int(ltd_mask.sum().item())} KC -> MBON weights.")
 
 
 def plot_things(data, show_video, mbon_ids, spike_sum, spike_frames, before, steps_per_frame, visualization_acc_window):
@@ -691,8 +747,58 @@ def main():
         action="store_true",
         help="Whether to show the video of the simulation (can be slow).",
     )
+    parser.add_argument(
+        "--odorant",
+        default=DEFAULT_ODORANT_KEY,
+        help=(
+            "Odorant key from code/odorant_checklist.csv "
+            f"(default: {DEFAULT_ODORANT_KEY})."
+        ),
+    )
+    parser.add_argument(
+        "--list_odorants",
+        action="store_true",
+        help="Print the odorant checklist and exit.",
+    )
+    parser.add_argument(
+        "--dopamine_type",
+        choices=("reward", "punishment"),
+        default=DOPAMINE_TYPE,
+        help="Reward weakens avoidance MBONs; punishment weakens approach MBONs.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=SEED,
+        help="Base random seed for pre/post odor trials and training trials.",
+    )
+    parser.add_argument(
+        "--skip_plots",
+        action="store_true",
+        help="Skip matplotlib plots and only print numeric summaries.",
+    )
+    parser.add_argument(
+        "--max_odor_orn_rate",
+        type=float,
+        default=MAX_ODOR_ORN_RATE,
+        help=(
+            "Maximum ORN Poisson input rate for a DoOR response of 1.0 "
+            f"(default: {MAX_ODOR_ORN_RATE})."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.list_odorants:
+        print_odorant_checklist()
+        return
+
     show_video = args.show_video
+    dopamine_type = args.dopamine_type
+    seed = args.seed
+    odorant_config = select_odorant_config(args.odorant)
+    odor_orn_type = odorant_config["flywire_orn_type"]
+    door_response_value = float(odorant_config["door_response_value"])
+    odor_orn_rate = door_response_value * args.max_odor_orn_rate
 
     t_run_sec = 0.2
     t_sim_ms = t_run_sec * 1000.0
@@ -706,9 +812,9 @@ def main():
 
     if torch.cuda.is_available():
         device_name = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device_name = "mps"
     else:
+        # Sparse COO operations used by the connectome weight matrix are not
+        # implemented on Apple MPS, so CPU is the correct local fallback.
         device_name = "cpu"
     print(f"Using device: {device_name}")
 
@@ -735,28 +841,31 @@ def main():
     classifications = pd.read_csv(Path(__name__).parent.parent / "data" / "classification.csv.gz")
     kc_ids, mbon_ids, _, _ = extract_ids(classifications)
 
-    odor_orn_indices = get_orn_indices_for_type(data, ODOR_ORN_TYPE)
+    odor_orn_indices = get_orn_indices_for_type(data, odor_orn_type)
 
     if len(odor_orn_indices) == 0:
-        raise ValueError(f"No ORNs found for {ODOR_ORN_TYPE}.")
+        raise ValueError(f"No ORNs found for {odor_orn_type}.")
 
-    rates[:, odor_orn_indices] = ODOR_ORN_RATE
+    rates[:, odor_orn_indices] = odor_orn_rate
 
     print(
-        f"Stimulating {ODOR_ORN_TYPE} for (+)-2-butanol "
-        f"with response value {DOOR_RESPONSE_VALUE}, "
-        f"simulation rate {ODOR_ORN_RATE}."
+        f"Stimulating {odor_orn_type} for {odorant_config['odorant_name']} "
+        f"({odorant_config['door_responding_unit']} / "
+        f"{odorant_config['receptor']} -> {odorant_config['glomerulus']}) "
+        f"with DoOR response value {door_response_value}, "
+        f"simulation rate {odor_orn_rate}."
     )
+    print(f"Odorant rationale: {odorant_config['rationale']}")
 
     kc_indices = [data.flyid2i[kc_id] for kc_id in kc_ids if kc_id in data.flyid2i]
     mbon_indices = [data.flyid2i[mbon_id] for mbon_id in mbon_ids if mbon_id in data.flyid2i]
 
-    if DOPAMINE_TYPE == "reward":
+    if dopamine_type == "reward":
         target_mbon_indices = build_mbon_type_indices(data, mbon_ids, AVOIDANCE_MBON_TYPES)
-    elif DOPAMINE_TYPE == "punishment":
+    elif dopamine_type == "punishment":
         target_mbon_indices = build_mbon_type_indices(data, mbon_ids, APPROACH_MBON_TYPES)
     else:
-        raise ValueError("DOPAMINE_TYPE must be 'reward' or 'punishment'.")
+        raise ValueError("--dopamine_type must be 'reward' or 'punishment'.")
 
     print("Number of MBONs:", len(mbon_indices))
     print("Number of target MBONs:", len(target_mbon_indices))
@@ -773,7 +882,7 @@ def main():
         record_video=show_video,
         steps_per_frame=steps_per_frame,
         visualization_acc_window=visualization_acc_window,
-        seed=SEED,
+        seed=seed,
     )
 
     print(f"Pre-test active KCs: {len(pre_active_kcs)}")
@@ -787,7 +896,7 @@ def main():
             kc_indices=kc_indices,
             mbon_indices=mbon_indices,
             num_steps=num_steps,
-            seed=1000+trial
+            seed=(seed + 1) * 1000 + trial,
         )
 
         print(f"Active KCs this trial: {len(active_kcs)}")
@@ -809,13 +918,47 @@ def main():
         record_video=show_video,
         steps_per_frame=steps_per_frame,
         visualization_acc_window=visualization_acc_window,
-        seed=SEED,
+        seed=seed,
     )
 
     print(f"Post-test active KCs: {len(post_active_kcs)}")
     print(f"Post-test MBON spikes: {post_mbon_spikes.sum().item()}")
 
     print(f"took {time.time() - start} seconds overall")
+
+    target_mask = torch.tensor(
+        [idx in set(target_mbon_indices) for idx in mbon_indices],
+        dtype=torch.bool,
+    )
+    target_pre_spikes = pre_mbon_spikes[target_mask].sum().item()
+    target_post_spikes = post_mbon_spikes[target_mask].sum().item()
+
+    print("Target pre MBON spikes:", target_pre_spikes)
+    print("Target post MBON spikes:", target_post_spikes)
+
+    summary = {
+        "odorant": args.odorant,
+        "odorant_name": odorant_config["odorant_name"],
+        "flywire_orn_type": odor_orn_type,
+        "dopamine_type": dopamine_type,
+        "seed": seed,
+        "max_odor_orn_rate": args.max_odor_orn_rate,
+        "odor_orn_rate": odor_orn_rate,
+        "active_kcs_pre": len(pre_active_kcs),
+        "active_kcs_post": len(post_active_kcs),
+        "mbon_spikes_pre": pre_mbon_spikes.sum().item(),
+        "mbon_spikes_post": post_mbon_spikes.sum().item(),
+        "target_mbon_spikes_pre": target_pre_spikes,
+        "target_mbon_spikes_post": target_post_spikes,
+        "target_mbon_spike_delta": target_post_spikes - target_pre_spikes,
+        "target_mbon_count": len(target_mbon_indices),
+        "neurons_spiked_pre": int((pre_spike_sum[0] > 0).sum().item()),
+        "neurons_spiked_post": int((post_spike_sum[0] > 0).sum().item()),
+    }
+    print("SUMMARY_JSON", json.dumps(summary, sort_keys=True))
+
+    if args.skip_plots:
+        return
 
     nonzero = (pre_mbon_spikes + post_mbon_spikes) > 0
     nonzero_indices = torch.where(nonzero)[0].numpy()
@@ -836,15 +979,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    target_mask = torch.tensor(
-        [idx in set(target_mbon_indices) for idx in mbon_indices],
-        dtype=torch.bool,
-    )
-
     target_nonzero = (pre_mbon_spikes + post_mbon_spikes > 0) & target_mask
-
-    print("Target pre MBON spikes:", pre_mbon_spikes[target_mask].sum().item())
-    print("Target post MBON spikes:", post_mbon_spikes[target_mask].sum().item())
 
     if target_nonzero.sum().item() == 0:
         print("No target MBONs spiked in either pre or post trial.")
@@ -871,4 +1006,5 @@ def main():
     plot_things(data, show_video, mbon_ids, post_spike_sum[0], post_spike_frames, False, steps_per_frame, visualization_acc_window)
 
 
-main()
+if __name__ == "__main__":
+    main()
