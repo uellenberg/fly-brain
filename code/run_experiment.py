@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 # MBONs.csv is used only to figure out which MBON columns are approach/avoidance MBONs.
 # This file can be found by querying for class == MBON in https://codex.flywire.ai/?dataset=fafb and downloading the CSV of the result
 
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 0.55
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -172,8 +172,8 @@ def run():
     kc_A = generate_odor(len(KC_IDS))  # The subset of Kenyon cells a random odor activates
     pre = model(kc_A)
 
-    for _ in range(1000):
-        train_step(model, kc_A, target_mbon_mask)
+    #for _ in range(1000):
+    train_step(model, kc_A, target_mbon_mask)
 
     post = model(kc_A)
 
